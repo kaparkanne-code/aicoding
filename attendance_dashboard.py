@@ -6,8 +6,13 @@ from datetime import datetime, timedelta
 import numpy as np
 import folium
 from streamlit_folium import folium_static
+import os
 from google import genai
 from google.genai import types
+from dotenv import load_dotenv
+
+# .env 파일 로드
+load_dotenv()
 
 # 페이지 설정
 st.set_page_config(
@@ -104,10 +109,10 @@ def generate_ai_insights(df, stats):
     """Gemini API를 사용하여 근태 데이터 인사이트를 생성하는 함수"""
     try:
         # API 키 확인
-        api_key = st.secrets.get('GEMINI_API_KEY')
+        api_key = os.getenv('GEMINI_API_KEY')
         st.write(f"🔍 API 키 확인: {'설정됨' if api_key else '설정되지 않음'}")
         if not api_key:
-            return "⚠️ Gemini API 키가 설정되지 않았습니다. Streamlit secrets에 GEMINI_API_KEY를 설정해주세요."
+            return "⚠️ Gemini API 키가 설정되지 않았습니다. .env 파일에 GEMINI_API_KEY를 설정해주세요."
         
         # 클라이언트 초기화
         client = genai.Client(api_key=api_key)
@@ -164,6 +169,85 @@ def generate_ai_insights(df, stats):
         
     except Exception as e:
         return f"❌ AI 인사이트 생성 중 오류가 발생했습니다: {str(e)}"
+
+def get_chatbot_response(user_message, df, stats, chat_history):
+    """챗봇 응답을 생성하는 함수"""
+    try:
+        # API 키 확인
+        api_key = os.getenv('GEMINI_API_KEY')
+        if not api_key:
+            return "⚠️ Gemini API 키가 설정되지 않았습니다. .env 파일에 GEMINI_API_KEY를 설정해주세요."
+        
+        # 클라이언트 초기화
+        client = genai.Client(api_key=api_key)
+        
+        # 데이터 컨텍스트 생성
+        data_context = f"""
+        현재 근태 데이터 현황:
+        - 총 직원 수: {stats['총_직원수']}명
+        - 총 근무일 수: {stats['총_근무일수']}일
+        - 평균 근무시간: {stats['평균_근무시간']:.1f}시간
+        - 평균 초과근무시간: {stats['평균_초과근무시간']:.1f}시간
+        - 초과근무 비율: {stats['초과근무_비율']:.1f}%
+        
+        부서별 평균 근무시간:
+        {df.groupby('부서')['총 근무시간'].mean().round(1).to_dict()}
+        
+        요일별 평균 근무시간:
+        {df.groupby('요일')['총 근무시간'].mean().round(1).to_dict()}
+        """
+        
+        # 채팅 기록을 컨텍스트에 포함
+        chat_context = ""
+        if chat_history:
+            chat_messages = []
+            for msg in chat_history[-3:]:
+                if msg['role'] == 'user':
+                    chat_messages.append(f"사용자: {msg['content']}")
+                else:
+                    chat_messages.append(f"챗봇: {msg['content']}")
+            chat_context = "\n\n이전 대화 내용:\n" + "\n".join(chat_messages)
+        
+        # 프롬프트 생성
+        prompt = f"""
+        당신은 근태 관리 대시보드의 AI 어시스턴트입니다. 
+        사용자의 질문에 대해 근태 데이터를 바탕으로 도움이 되는 답변을 제공해주세요.
+        
+        {data_context}
+        {chat_context}
+        
+        사용자 질문: {user_message}
+        
+        다음 지침을 따라 답변해주세요:
+        1. 근태 데이터와 관련된 질문에 대해서는 구체적인 수치와 함께 답변
+        2. 데이터 분석이나 인사이트가 필요한 경우 현재 데이터를 바탕으로 분석
+        3. 근태 관리 개선 방안이나 정책 관련 질문에 대해서는 실용적인 조언 제공
+        4. 일반적인 질문에 대해서도 친근하고 도움이 되는 답변 제공
+        5. 한국어로 자연스럽게 답변
+        6. 답변은 간결하고 명확하게 작성
+        """
+        
+        # Gemini API 호출
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.7,
+                max_output_tokens=2000
+            )
+        )
+        
+        return response.text
+        
+    except Exception as e:
+        return f"❌ 챗봇 응답 생성 중 오류가 발생했습니다: {str(e)}"
+
+def initialize_chat_session():
+    """채팅 세션을 초기화하는 함수"""
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+    if 'chat_input' not in st.session_state:
+        st.session_state.chat_input = ""
 
 # 사이드바 - 파일 업로드
 with st.sidebar:
@@ -260,7 +344,7 @@ if df is not None:
     st.markdown("## 📊 차트 분석")
     
     # 탭으로 차트 구분
-    tab1, tab2, tab3, tab4 = st.tabs(["📅 시간별 분석", "👥 부서별 분석", "👤 개인별 분석", "📈 추이 분석"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📅 시간별 분석", "👥 부서별 분석", "👤 개인별 분석", "📈 추이 분석", "🤖 AI 챗봇"])
     
     with tab1:
         # 시간별 근무시간 분포
@@ -379,6 +463,96 @@ if df is not None:
         )
         st.plotly_chart(fig8, use_container_width=True)
     
+    with tab5:
+        # 챗봇 UI
+        st.markdown("### 🤖 AI 챗봇")
+        st.markdown("근태 데이터에 대해 궁금한 것을 물어보세요!")
+        
+        # 채팅 세션 초기화
+        initialize_chat_session()
+        
+        # 채팅 기록 표시
+        chat_container = st.container()
+        with chat_container:
+            if st.session_state.chat_history:
+                for i, message in enumerate(st.session_state.chat_history):
+                    if message['role'] == 'user':
+                        st.markdown(f"**👤 사용자:** {message['content']}")
+                    else:
+                        st.markdown(f"**🤖 AI:** {message['content']}")
+                    st.markdown("---")
+            else:
+                st.info("안녕하세요! 근태 데이터에 대해 궁금한 것이 있으시면 언제든 물어보세요. 예를 들어:")
+                st.markdown("""
+                - "부서별 평균 근무시간을 알려주세요"
+                - "초과근무가 많은 부서는 어디인가요?"
+                - "근무 패턴에 문제가 있나요?"
+                - "워라밸 개선 방안을 제안해주세요"
+                """)
+        
+        # 채팅 입력
+        col1, col2 = st.columns([4, 1])
+        
+        with col1:
+            user_input = st.text_input(
+                "메시지를 입력하세요:",
+                key="chat_input",
+                placeholder="근태 데이터에 대해 질문해보세요..."
+            )
+        
+        with col2:
+            send_button = st.button("전송", type="primary", use_container_width=True)
+        
+        # 메시지 전송 처리
+        if send_button and user_input:
+            # 사용자 메시지를 채팅 기록에 추가
+            st.session_state.chat_history.append({
+                'role': 'user',
+                'content': user_input,
+                'timestamp': datetime.now()
+            })
+            
+            # AI 응답 생성
+            with st.spinner("AI가 답변을 생성하고 있습니다..."):
+                bot_response = get_chatbot_response(
+                    user_input, 
+                    df_processed, 
+                    stats, 
+                    st.session_state.chat_history
+                )
+            
+            # AI 응답을 채팅 기록에 추가
+            st.session_state.chat_history.append({
+                'role': 'bot',
+                'content': bot_response,
+                'timestamp': datetime.now()
+            })
+            
+            # 페이지 새로고침하여 새 메시지 표시
+            st.rerun()
+        
+        # 채팅 기록 초기화 버튼
+        if st.session_state.chat_history:
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                if st.button("🗑️ 채팅 기록 삭제", use_container_width=True):
+                    st.session_state.chat_history = []
+                    st.rerun()
+            with col2:
+                # 채팅 기록 다운로드
+                chat_text = ""
+                for msg in st.session_state.chat_history:
+                    role = "사용자" if msg['role'] == 'user' else "AI"
+                    chat_text += f"[{msg['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}] {role}: {msg['content']}\n\n"
+                
+                st.download_button(
+                    "💾 채팅 기록 다운로드",
+                    data=chat_text,
+                    file_name=f"채팅기록_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                    mime="text/plain",
+                    use_container_width=True
+                )
+    
     # 데이터 테이블
     st.markdown("## 📋 상세 데이터")
     
@@ -451,22 +625,18 @@ if df is not None:
             )
     
     # API 키 설정 안내
-    if not st.secrets.get('GEMINI_API_KEY'):
+    if not os.getenv('GEMINI_API_KEY'):
         st.warning("""
         ⚠️ **Gemini API 키가 설정되지 않았습니다.**
         
         AI 인사이트 기능을 사용하려면:
         1. [Google AI Studio](https://ai.google.dev/)에서 API 키를 발급받으세요
-        2. Streamlit Cloud의 Secrets 관리 페이지에서 설정하세요
+        2. 프로젝트 루트에 `.env` 파일을 생성하세요
+        3. `.env` 파일에 `GEMINI_API_KEY=your_api_key_here`를 추가하세요
         
-        설정 방법:
-        - Streamlit Cloud: 대시보드 > 설정 > Secrets 
-        - 로컬 개발: `.streamlit/secrets.toml` 파일에 다음을 추가하세요:
-        
-        ```
-        GEMINI_API_KEY = "your_api_key_here"
-        ```
+        자세한 설정 방법은 `env.txt` 파일을 참고하세요.
         """)
 
 else:
     st.info("👈 왼쪽 사이드바에서 엑셀 파일을 업로드하거나 샘플 데이터를 사용하세요.")
+
